@@ -798,20 +798,39 @@ function App() {
   const fetchFxRate = async () => {
     setFxLoading(true);
     setFxError("");
-    try {
-      const res = await fetch("https://api.frankfurter.app/latest?from=USD&to=JPY");
-      if (!res.ok) throw new Error(`為替APIエラー（${res.status}）`);
-      const data = await res.json();
-      const rate = data && data.rates && data.rates.JPY;
-      if (typeof rate === "number" && rate > 0) {
-        setFx(rate);
-        setFxUpdatedAt(new Date());
-      } else {
-        throw new Error("為替レートの形式が想定と異なります");
+    const sources = [
+      {
+        url: "https://api.frankfurter.dev/v1/latest?base=USD&symbols=JPY",
+        extract: (data) => data && data.rates && data.rates.JPY,
+      },
+      {
+        url: "https://api.frankfurter.app/latest?from=USD&to=JPY",
+        extract: (data) => data && data.rates && data.rates.JPY,
+      },
+      {
+        url: "https://open.er-api.com/v6/latest/USD",
+        extract: (data) => data && data.rates && data.rates.JPY,
+      },
+    ];
+    let lastError = "";
+    for (const source of sources) {
+      try {
+        const res = await fetch(source.url);
+        if (!res.ok) { lastError = `為替APIエラー（${res.status}）`; continue; }
+        const data = await res.json();
+        const rate = source.extract(data);
+        if (typeof rate === "number" && rate > 0) {
+          setFx(rate);
+          setFxUpdatedAt(new Date());
+          setFxLoading(false);
+          return;
+        }
+        lastError = "為替レートの形式が想定と異なります";
+      } catch (e) {
+        lastError = e && e.message ? e.message : "取得に失敗しました";
       }
-    } catch (e) {
-      setFxError(e && e.message ? e.message : "取得に失敗しました。時間をおいて再度お試しください。");
     }
+    setFxError(lastError || "取得に失敗しました。時間をおいて再度お試しください。");
     setFxLoading(false);
   };
 
