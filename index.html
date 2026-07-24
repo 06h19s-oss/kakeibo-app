@@ -171,7 +171,7 @@ const GLOW = (hex, alpha = "55") => `0 0 18px ${hex}${alpha}`;
 const DEFAULT_EXPENSE_CATS = ["食費", "住居", "光熱費", "交通", "娯楽", "美容", "通信", "その他"];
 const DEFAULT_INCOME_CATS = ["給与", "副業", "配当", "その他"];
 const defaultContribSettings = () => {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayLocalStr();
   return {
     NISA: {
       enabled: false,
@@ -214,6 +214,7 @@ const WEEKDAY_SUN_FIRST = ["日", "月", "火", "水", "木", "金", "土"];
 const yen = n => "¥" + Math.round(n).toLocaleString("ja-JP");
 const monthKey = d => d.slice(0, 7);
 const pad = n => String(n).padStart(2, "0");
+const fmtDate = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const daysInMonth = monthStr => {
   const [y, m] = monthStr.split("-").map(Number);
   return new Date(y, m, 0).getDate();
@@ -221,7 +222,7 @@ const daysInMonth = monthStr => {
 const shiftDay = (dateStr, delta) => {
   const d = new Date(dateStr + "T00:00:00");
   d.setDate(d.getDate() + delta);
-  return d.toISOString().slice(0, 10);
+  return fmtDate(d);
 };
 const shiftMonth = (monthStr, delta) => {
   let [y, m] = monthStr.split("-").map(Number);
@@ -237,17 +238,17 @@ const shiftMonth = (monthStr, delta) => {
   return `${y}-${pad(m)}`;
 };
 const shiftYear = (yearStr, delta) => String(Number(yearStr) + delta);
+const todayLocalStr = () => fmtDate(new Date());
 const addMonthsToDate = (dateStr, n) => {
   const d = new Date(dateStr + "T00:00:00");
   d.setMonth(d.getMonth() + n);
-  return d.toISOString().slice(0, 10);
+  return fmtDate(d);
 };
 const addYearsToDate = (dateStr, n) => {
   const d = new Date(dateStr + "T00:00:00");
   d.setFullYear(d.getFullYear() + n);
-  return d.toISOString().slice(0, 10);
+  return fmtDate(d);
 };
-const fmtDate = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 // The payday boundary date for a given calendar month, pulled back to the
 // nearest weekday if it falls on a Saturday or Sunday (public holidays are
 // not accounted for).
@@ -722,7 +723,7 @@ function App() {
       // only one save fires afterward per key — avoiding a save-vs-save race
       // that could let a stale save win and revert the just-applied entries
       // after closing/reopening.
-      const todayStr = new Date().toISOString().slice(0, 10);
+      const todayStr = todayLocalStr();
       const {
         holdings: contributedHoldings,
         contribSettings: updatedContribSettings,
@@ -778,7 +779,7 @@ function App() {
 
   // ---- Ledger form ----
   const [txForm, setTxForm] = useState({
-    date: new Date().toISOString().slice(0, 10),
+    date: todayLocalStr(),
     type: "expense",
     category: DEFAULT_EXPENSE_CATS[0],
     amount: "",
@@ -872,7 +873,7 @@ function App() {
 
   // ---- Ledger sub-view (lifted so editing a transaction can jump to input) ----
   const [ledgerSubView, setLedgerSubView] = useState("input");
-  const [selectedDate, setSelectedDate] = useState(new Date().toISOString().slice(0, 10));
+  const [selectedDate, setSelectedDate] = useState(todayLocalStr());
 
   // ---- Portfolio form ----
   const blankHForm = {
@@ -1546,7 +1547,7 @@ function RecurringSettings({
     amount: "",
     memo: "",
     frequency: "monthly",
-    nextDate: new Date().toISOString().slice(0, 10)
+    nextDate: todayLocalStr()
   });
   const cats = form.type === "income" ? categories.income : categories.expense;
   const handleAdd = () => {
@@ -1934,7 +1935,7 @@ function LedgerCalendar({
   payday,
   onAddForDate
 }) {
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayStr = todayLocalStr();
   const period = useMemo(() => kakeiboPeriodFor(selectedDate, payday), [selectedDate, payday]);
   const navigatePeriod = delta => {
     const nextPeriod = shiftKakeiboPeriod(period.label, payday, delta);
@@ -2149,7 +2150,7 @@ function LedgerReport({
   categories,
   payday
 }) {
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayStr = todayLocalStr();
   const [reportType, setReportType] = useState("month");
   const [reportValue, setReportValue] = useState(() => kakeiboPeriodFor(todayStr, payday).label);
   const [breakdownType, setBreakdownType] = useState("expense");
