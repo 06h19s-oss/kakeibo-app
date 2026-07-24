@@ -1828,11 +1828,18 @@ function LedgerInput({
       color: T.inkSoft
     }
   }, txForm.type === "income" ? "収入" : "支出"), /*#__PURE__*/React.createElement("div", {
-    className: "flex items-center gap-2 px-3 py-3 rounded-2xl",
+    className: "rounded-2xl",
     style: {
+      display: "flex",
+      flexDirection: "row",
+      alignItems: "center",
+      height: 56,
+      gap: 8,
+      padding: "0 12px",
       background: T.glass,
       border: `1px solid ${T.rule}`,
-      boxShadow: SHADOW()
+      boxShadow: SHADOW(),
+      boxSizing: "border-box"
     }
   }, /*#__PURE__*/React.createElement("input", {
     type: "number",
@@ -1843,15 +1850,25 @@ function LedgerInput({
       ...f,
       amount: e.target.value
     })),
-    className: "text-3xl font-bold flex-1 text-right bg-transparent outline-none",
+    className: "font-bold text-right bg-transparent outline-none",
     style: {
       color: T.ink,
-      fontFamily: '"SF Mono","Menlo",monospace'
+      fontFamily: '"SF Mono","Menlo",monospace',
+      fontSize: 30,
+      lineHeight: "36px",
+      height: 36,
+      padding: 0,
+      margin: 0,
+      border: "none",
+      flex: "1 1 auto",
+      minWidth: 0
     }
   }), /*#__PURE__*/React.createElement("span", {
-    className: "text-sm",
+    className: "flex-shrink-0",
     style: {
-      color: T.inkSoft
+      color: T.inkSoft,
+      fontSize: 14,
+      lineHeight: "36px"
     }
   }, "円"))), /*#__PURE__*/React.createElement("div", {
     className: "flex items-center justify-between mb-2"
