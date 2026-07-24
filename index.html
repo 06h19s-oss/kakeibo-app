@@ -1,0 +1,2172 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+<title>家計簿 & 資産台帳</title>
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://cdn.tailwindcss.com" crossorigin="anonymous"></script>
+<style>
+  html, body { margin: 0; padding: 0; background: #0C0E13; }
+  input[type=number]::-webkit-inner-spin-button,
+  input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  input[type=number] { -moz-appearance: textfield; appearance: textfield; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<div id="fallback-error" style="display:none; padding:16px; font-family:monospace; white-space:pre-wrap; color:#FB7185; background:#0C0E13;"></div>
+<script>
+  window.addEventListener("error", function (e) {
+    var box = document.getElementById("fallback-error");
+    if (box) {
+      box.style.display = "block";
+      box.textContent = "読み込み中にエラーが発生しました:\n" + (e.message || e.error || "詳細不明") +
+        (e.filename ? ("\n" + e.filename + ":" + e.lineno) : "") +
+        "\n\n再読み込みしても直らない場合は、この文言を教えてください。";
+    }
+  });
+</script>
+<script>
+const {
+  useState,
+  useEffect,
+  useMemo,
+  useCallback,
+  useRef
+} = React;
+
+// ---- Persistence shim: same .get/.set interface as the Claude-artifact
+// storage API, backed by plain browser localStorage. Runs standalone in
+// any browser, with no dependency on Claude.ai's artifact sandbox. ----
+window.storage = {
+  async get(key) {
+    const v = localStorage.getItem(key);
+    if (v === null) throw new Error("key not found: " + key);
+    return {
+      key,
+      value: v
+    };
+  },
+  async set(key, value) {
+    localStorage.setItem(key, value);
+    return {
+      key,
+      value
+    };
+  }
+};
+
+// ---- Icon shim: lightweight emoji-based stand-ins for the lucide-react
+// icons used throughout the app, so no external icon library is required. ----
+function makeIcon(glyph) {
+  return function Icon({
+    size = 16,
+    className = "",
+    style = {}
+  }) {
+    return /*#__PURE__*/React.createElement("span", {
+      className: className,
+      style: {
+        fontSize: size,
+        lineHeight: 1,
+        display: "inline-flex",
+        ...style
+      }
+    }, glyph);
+  };
+}
+const Plus = makeIcon("➕");
+const Trash2 = makeIcon("🗑️");
+const BookOpen = makeIcon("📖");
+const Landmark = makeIcon("🏦");
+const LayoutDashboard = makeIcon("📊");
+const Settings = makeIcon("⚙️");
+const ChevronLeft = makeIcon("◀");
+const ChevronRight = makeIcon("▶");
+const X = makeIcon("✕");
+const PenLine = makeIcon("✏️");
+const CalendarIcon = makeIcon("📅");
+const PieChartIcon = makeIcon("🥧");
+const RefreshCw = makeIcon("🔄");
+const Pencil = makeIcon("✏️");
+const Utensils = makeIcon("🍽️");
+const Home = makeIcon("🏠");
+const Droplet = makeIcon("💡");
+const Train = makeIcon("🚃");
+const PartyPopper = makeIcon("🎉");
+const Sparkles = makeIcon("💄");
+const Smartphone = makeIcon("📱");
+const Package = makeIcon("📦");
+const Wallet = makeIcon("💰");
+const Briefcase = makeIcon("💼");
+const TrendingUp = makeIcon("📈");
+const Tag = makeIcon("🏷️");
+
+// ---- Custom SVG donut chart (replaces recharts, zero dependencies) ----
+function DonutChart({
+  data,
+  colorFor,
+  size = 200
+}) {
+  const total = data.reduce((s, d) => s + d.value, 0);
+  if (!total) return null;
+  const r = 15.91549430918954;
+  let cumulative = 0;
+  return /*#__PURE__*/React.createElement("svg", {
+    viewBox: "0 0 42 42",
+    width: size,
+    height: size,
+    style: {
+      transform: "rotate(-90deg)"
+    }
+  }, /*#__PURE__*/React.createElement("circle", {
+    cx: "21",
+    cy: "21",
+    r: r,
+    fill: "transparent",
+    stroke: "rgba(255,255,255,0.08)",
+    strokeWidth: "6"
+  }), data.map((d, i) => {
+    const pct = d.value / total * 100;
+    const dasharray = `${pct} ${100 - pct}`;
+    const dashoffset = -cumulative;
+    cumulative += pct;
+    return /*#__PURE__*/React.createElement("circle", {
+      key: i,
+      cx: "21",
+      cy: "21",
+      r: r,
+      fill: "transparent",
+      stroke: colorFor(d.name, i),
+      strokeWidth: "6",
+      strokeDasharray: dasharray,
+      strokeDashoffset: dashoffset
+    });
+  }));
+}
+
+// ---- Design tokens (dark glassmorphism aesthetic) ----
+const T = {
+  paper: "#0C0E13",
+  paperDark: "rgba(255,255,255,0.05)",
+  ink: "#F2F2F5",
+  inkSoft: "#9198A8",
+  navy: "#34D399",
+  navyDeep: "#F2F2F5",
+  hanko: "#FB7185",
+  hankoDeep: "#F43F5E",
+  brass: "#D4AF6A",
+  brassLight: "#E8CB8A",
+  rule: "rgba(255,255,255,0.14)",
+  cream: "#F2F2F5",
+  glass: "rgba(255,255,255,0.07)"
+};
+const SHADOW = () => "0 8px 28px rgba(0,0,0,0.5)";
+const SHADOW_SM = () => "0 4px 16px rgba(0,0,0,0.4)";
+const GLOW = (hex, alpha = "55") => `0 0 18px ${hex}${alpha}`;
+const DEFAULT_EXPENSE_CATS = ["食費", "住居", "光熱費", "交通", "娯楽", "美容", "通信", "その他"];
+const DEFAULT_INCOME_CATS = ["給与", "副業", "配当", "その他"];
+const ACCOUNT_TYPES = ["NISA", "iDeCo", "特定口座", "現金", "不動産"];
+const ACCOUNT_COLORS = {
+  NISA: "#34D399",
+  iDeCo: "#D4AF6A",
+  特定口座: "#FB7185",
+  現金: "#A78BFA",
+  不動産: "#38BDF8"
+};
+const CAT_PALETTE = ["#34D399", "#FB7185", "#D4AF6A", "#A78BFA", "#38BDF8", "#F472B6", "#FB923C", "#2DD4BF", "#94A3B8", "#C084FC"];
+const CATEGORY_ICON_MAP = {
+  食費: Utensils,
+  住居: Home,
+  光熱費: Droplet,
+  交通: Train,
+  娯楽: PartyPopper,
+  美容: Sparkles,
+  通信: Smartphone,
+  その他: Package,
+  給与: Wallet,
+  副業: Briefcase,
+  配当: TrendingUp
+};
+const WEEKDAY_MON_FIRST = ["月", "火", "水", "木", "金", "土", "日"];
+const WEEKDAY_SUN_FIRST = ["日", "月", "火", "水", "木", "金", "土"];
+const yen = n => "¥" + Math.round(n).toLocaleString("ja-JP");
+const monthKey = d => d.slice(0, 7);
+const pad = n => String(n).padStart(2, "0");
+const daysInMonth = monthStr => {
+  const [y, m] = monthStr.split("-").map(Number);
+  return new Date(y, m, 0).getDate();
+};
+const shiftDay = (dateStr, delta) => {
+  const d = new Date(dateStr + "T00:00:00");
+  d.setDate(d.getDate() + delta);
+  return d.toISOString().slice(0, 10);
+};
+const shiftMonth = (monthStr, delta) => {
+  let [y, m] = monthStr.split("-").map(Number);
+  m += delta;
+  while (m < 1) {
+    m += 12;
+    y -= 1;
+  }
+  while (m > 12) {
+    m -= 12;
+    y += 1;
+  }
+  return `${y}-${pad(m)}`;
+};
+const shiftYear = (yearStr, delta) => String(Number(yearStr) + delta);
+const addMonthsToDate = (dateStr, n) => {
+  const d = new Date(dateStr + "T00:00:00");
+  d.setMonth(d.getMonth() + n);
+  return d.toISOString().slice(0, 10);
+};
+const addYearsToDate = (dateStr, n) => {
+  const d = new Date(dateStr + "T00:00:00");
+  d.setFullYear(d.getFullYear() + n);
+  return d.toISOString().slice(0, 10);
+};
+const catColor = (name, list) => {
+  const idx = list.indexOf(name);
+  return idx >= 0 ? CAT_PALETTE[idx % CAT_PALETTE.length] : T.inkSoft;
+};
+const categoryIcon = name => CATEGORY_ICON_MAP[name] || Tag;
+const formatDateJP = dateStr => {
+  const d = new Date(dateStr + "T00:00:00");
+  return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日(${WEEKDAY_SUN_FIRST[d.getDay()]})`;
+};
+
+// Pure computation (no React state) so it can run once, synchronously, before first paint settles.
+function processAutoContributions(holdings, todayStr) {
+  let totalApplied = 0;
+  let countApplied = 0;
+  const newTxs = [];
+  const updated = holdings.map(h => {
+    if (!h.autoContribute || !h.contributionAmount || !h.nextContributionDate) return h;
+    const occurrences = [];
+    let cursor = h.nextContributionDate;
+    let guard = 0;
+    while (cursor <= todayStr && guard < 120) {
+      occurrences.push(cursor);
+      cursor = h.contributionFrequency === "monthly" ? addMonthsToDate(cursor, 1) : addYearsToDate(cursor, 1);
+      guard++;
+    }
+    if (occurrences.length === 0) return h;
+    let qty = h.quantity;
+    let avgCost = h.avgCost;
+    const amt = Number(h.contributionAmount);
+    occurrences.forEach(occDate => {
+      const price = h.currentPrice || avgCost || 1;
+      const addedQty = price > 0 ? amt / price : 0;
+      const newQty = qty + addedQty;
+      avgCost = newQty > 0 ? (qty * avgCost + addedQty * price) / newQty : avgCost;
+      qty = newQty;
+      newTxs.push({
+        id: crypto.randomUUID(),
+        date: occDate,
+        type: "expense",
+        category: h.accountType === "NISA" ? "NISA積立" : h.accountType === "iDeCo" ? "iDeCo拠出" : "積立投資",
+        amount: amt,
+        memo: `${h.name} 自動積立`
+      });
+      totalApplied += amt;
+      countApplied += 1;
+    });
+    return {
+      ...h,
+      quantity: qty,
+      avgCost,
+      nextContributionDate: cursor
+    };
+  });
+  return {
+    holdings: updated,
+    newTxs,
+    totalApplied,
+    countApplied
+  };
+}
+function StampButton({
+  onClick,
+  children,
+  tone = "hanko",
+  full = false
+}) {
+  const accent = tone === "hanko" ? T.hanko : tone === "brass" ? T.brass : T.navy;
+  return /*#__PURE__*/React.createElement("button", {
+    onClick: onClick,
+    className: `flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-2xl text-sm font-semibold transition-transform active:scale-95 ${full ? "w-full" : ""}`,
+    style: {
+      background: `${accent}1F`,
+      color: accent,
+      border: `1px solid ${accent}`,
+      boxShadow: GLOW(accent),
+      letterSpacing: "0.02em"
+    }
+  }, children);
+}
+function Field({
+  label,
+  children
+}) {
+  return /*#__PURE__*/React.createElement("label", {
+    className: "flex flex-col gap-1 text-xs",
+    style: {
+      color: T.inkSoft
+    }
+  }, /*#__PURE__*/React.createElement("span", null, label), children);
+}
+const inputStyle = {
+  background: T.glass,
+  border: `1px solid ${T.rule}`,
+  color: T.ink
+};
+function HankoStamp({
+  show
+}) {
+  if (!show) return null;
+  return /*#__PURE__*/React.createElement("div", {
+    className: "fixed inset-0 flex items-center justify-center pointer-events-none z-50",
+    style: {
+      animation: "stampFade 900ms ease-out forwards"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center gap-2 font-semibold rounded-2xl",
+    style: {
+      padding: "14px 26px",
+      background: "rgba(20,22,28,0.75)",
+      border: `1px solid ${T.navy}`,
+      boxShadow: GLOW(T.navy, "40"),
+      color: T.navy,
+      fontSize: 16,
+      animation: "stampIn 380ms cubic-bezier(.2,1,.3,1)"
+    }
+  }, "✓ 記帳完了"), /*#__PURE__*/React.createElement("style", null, `
+        @keyframes stampIn { 0% { transform: scale(0.85); opacity:0 } 100% { transform: scale(1); opacity:1 } }
+        @keyframes stampFade { 0% { opacity:0 } 15% { opacity:1 } 75% { opacity:1 } 100% { opacity:0 } }
+      `));
+}
+function LedgerLines({
+  children
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    className: "rounded-2xl overflow-hidden",
+    style: {
+      background: T.glass,
+      border: `1px solid ${T.rule}`,
+      boxShadow: SHADOW()
+    }
+  }, children);
+}
+function App() {
+  const [tab, setTab] = useState("overview");
+  const [transactions, setTransactions] = useState([]);
+  const [holdings, setHoldings] = useState([]);
+  const [categories, setCategories] = useState({
+    expense: DEFAULT_EXPENSE_CATS,
+    income: DEFAULT_INCOME_CATS
+  });
+  const [loaded, setLoaded] = useState(false);
+  const [stamp, setStamp] = useState(0);
+  const [fx, setFx] = useState(150);
+  const [contribBanner, setContribBanner] = useState(null);
+  const [saveStatus, setSaveStatus] = useState({
+    ok: true,
+    at: null,
+    message: ""
+  });
+  const [showBackup, setShowBackup] = useState(false);
+  const [restoreText, setRestoreText] = useState("");
+  const [restoreMessage, setRestoreMessage] = useState("");
+  useEffect(() => {
+    (async () => {
+      let finalTransactions = [];
+      let finalHoldings = [];
+      let finalCategories = {
+        expense: DEFAULT_EXPENSE_CATS,
+        income: DEFAULT_INCOME_CATS
+      };
+      let finalFx = 150;
+      try {
+        let res;
+        try {
+          res = await window.storage.get("kakeibo:data");
+        } catch (firstErr) {
+          // Could be a genuinely-new key, or a transient read failure right
+          // after a recent write. Wait briefly and try once more before
+          // concluding there's really no data.
+          await new Promise(r => setTimeout(r, 400));
+          res = await window.storage.get("kakeibo:data");
+        }
+        if (res && res.value) {
+          const parsed = JSON.parse(res.value);
+          finalTransactions = parsed.transactions || [];
+          finalHoldings = parsed.holdings || [];
+          finalFx = parsed.fx || 150;
+          finalCategories = parsed.categories || finalCategories;
+        }
+      } catch (e) {
+        // Still no data after retry — treat as a fresh/empty ledger.
+      }
+
+      // Apply any due NISA/iDeCo contributions BEFORE the first state settle.
+      // Doing this here (not in a second effect) means there is only one
+      // state commit at load time, so only one save fires afterward —
+      // avoiding a save-vs-save race that could let a stale save win and
+      // revert the just-applied contribution after closing/reopening.
+      const todayStr = new Date().toISOString().slice(0, 10);
+      const {
+        holdings: contributedHoldings,
+        newTxs,
+        totalApplied,
+        countApplied
+      } = processAutoContributions(finalHoldings, todayStr);
+      finalHoldings = contributedHoldings;
+      if (newTxs.length > 0) {
+        finalTransactions = [...newTxs, ...finalTransactions];
+        const need = [...new Set(newTxs.map(t => t.category))].filter(c => !finalCategories.expense.includes(c));
+        if (need.length) finalCategories = {
+          ...finalCategories,
+          expense: [...finalCategories.expense, ...need]
+        };
+        setContribBanner({
+          count: countApplied,
+          total: totalApplied
+        });
+      }
+      setTransactions(finalTransactions);
+      setHoldings(finalHoldings);
+      setFx(finalFx);
+      setCategories(finalCategories);
+      setLoaded(true);
+    })();
+  }, []);
+
+  // Saving: a naive "save on every change" can fire overlapping writes to the
+  // same key, and if an older write's response happens to land after a newer
+  // one, the stale write wins and silently reverts recent changes on reload.
+  // This keeps only the LATEST snapshot in a ref and runs a single save loop
+  // that never overlaps itself, looping again if new changes arrived while
+  // the previous save was in flight.
+  const latestDataRef = useRef(null);
+  const saveVersionRef = useRef(0);
+  const isSavingRef = useRef(false);
+  useEffect(() => {
+    if (!loaded) return;
+    latestDataRef.current = {
+      transactions,
+      holdings,
+      fx,
+      categories
+    };
+    saveVersionRef.current += 1;
+    if (isSavingRef.current) return;
+    isSavingRef.current = true;
+    (async () => {
+      let savedVersion = -1;
+      while (savedVersion !== saveVersionRef.current) {
+        const versionBeingSaved = saveVersionRef.current;
+        const dataBeingSaved = latestDataRef.current;
+        const payload = JSON.stringify(dataBeingSaved);
+        let lastError = null;
+        let ok = false;
+        for (let attempt = 0; attempt < 3 && !ok; attempt++) {
+          if (attempt > 0) await new Promise(r => setTimeout(r, 300 * attempt));
+          try {
+            const result = await window.storage.set("kakeibo:data", payload);
+            if (result) {
+              ok = true;
+            } else {
+              lastError = "保存APIがnullを返しました";
+            }
+          } catch (e) {
+            lastError = String(e && e.message ? e.message : e);
+            console.error("save attempt failed", attempt, e);
+          }
+        }
+        setSaveStatus(ok ? {
+          ok: true,
+          at: new Date(),
+          message: ""
+        } : {
+          ok: false,
+          at: new Date(),
+          message: lastError
+        });
+        savedVersion = versionBeingSaved;
+      }
+      isSavingRef.current = false;
+    })();
+  }, [transactions, holdings, fx, categories, loaded]);
+  const fireStamp = useCallback(() => setStamp(s => s + 1), []);
+
+  // ---- Ledger form ----
+  const [txForm, setTxForm] = useState({
+    date: new Date().toISOString().slice(0, 10),
+    type: "expense",
+    category: DEFAULT_EXPENSE_CATS[0],
+    amount: "",
+    memo: ""
+  });
+  const [editingTxId, setEditingTxId] = useState(null);
+  const saveTransaction = () => {
+    if (!txForm.amount || isNaN(Number(txForm.amount)) || Number(txForm.amount) <= 0) return;
+    if (editingTxId) {
+      setTransactions(prev => prev.map(t => t.id === editingTxId ? {
+        ...t,
+        ...txForm,
+        amount: Number(txForm.amount)
+      } : t));
+      setEditingTxId(null);
+    } else {
+      setTransactions(prev => [{
+        id: crypto.randomUUID(),
+        ...txForm,
+        amount: Number(txForm.amount)
+      }, ...prev]);
+    }
+    setTxForm(f => ({
+      ...f,
+      amount: "",
+      memo: ""
+    }));
+    fireStamp();
+  };
+  const deleteTransaction = id => {
+    setTransactions(prev => prev.filter(t => t.id !== id));
+    if (editingTxId === id) {
+      setEditingTxId(null);
+      setTxForm(f => ({
+        ...f,
+        amount: "",
+        memo: ""
+      }));
+    }
+  };
+  const startEditTransaction = t => {
+    setTxForm({
+      date: t.date,
+      type: t.type,
+      category: t.category,
+      amount: String(t.amount),
+      memo: t.memo || ""
+    });
+    setEditingTxId(t.id);
+    setLedgerSubView("input");
+  };
+  const cancelEditTransaction = () => {
+    setEditingTxId(null);
+    setTxForm(f => ({
+      ...f,
+      amount: "",
+      memo: ""
+    }));
+  };
+  const monthlyData = useMemo(() => {
+    const map = {};
+    transactions.forEach(t => {
+      const mk = monthKey(t.date);
+      if (!map[mk]) map[mk] = {
+        month: mk,
+        収入: 0,
+        支出: 0
+      };
+      if (t.type === "income") map[mk].収入 += t.amount;else map[mk].支出 += t.amount;
+    });
+    return Object.values(map).sort((a, b) => a.month.localeCompare(b.month)).slice(-6);
+  }, [transactions]);
+  const totalIncome = useMemo(() => transactions.filter(t => t.type === "income").reduce((s, t) => s + t.amount, 0), [transactions]);
+  const totalExpense = useMemo(() => transactions.filter(t => t.type === "expense").reduce((s, t) => s + t.amount, 0), [transactions]);
+  const cashBalance = totalIncome - totalExpense;
+
+  // ---- Ledger sub-view (lifted so editing a transaction can jump to input) ----
+  const [ledgerSubView, setLedgerSubView] = useState("input");
+  const [selectedDate, setSelectedDate] = useState(new Date().toISOString().slice(0, 10));
+
+  // ---- Portfolio form ----
+  const blankHForm = {
+    name: "",
+    accountType: ACCOUNT_TYPES[0],
+    currency: "JPY",
+    quantity: "",
+    avgCost: "",
+    currentPrice: "",
+    autoContribute: false,
+    contributionAmount: "",
+    contributionFrequency: "yearly",
+    nextContributionDate: new Date().toISOString().slice(0, 10)
+  };
+  const [hForm, setHForm] = useState(blankHForm);
+  const [editingHoldingId, setEditingHoldingId] = useState(null);
+  const saveHolding = () => {
+    if (!hForm.name || !hForm.quantity) return;
+    const record = {
+      ...hForm,
+      quantity: Number(hForm.quantity),
+      avgCost: Number(hForm.avgCost || 0),
+      currentPrice: Number(hForm.currentPrice || hForm.avgCost || 0),
+      autoContribute: !!hForm.autoContribute,
+      contributionAmount: Number(hForm.contributionAmount || 0),
+      contributionFrequency: hForm.contributionFrequency || "yearly",
+      nextContributionDate: hForm.nextContributionDate || new Date().toISOString().slice(0, 10)
+    };
+    if (editingHoldingId) {
+      setHoldings(prev => prev.map(h => h.id === editingHoldingId ? {
+        ...h,
+        ...record
+      } : h));
+      setEditingHoldingId(null);
+    } else {
+      setHoldings(prev => [{
+        id: crypto.randomUUID(),
+        ...record
+      }, ...prev]);
+    }
+    setHForm(blankHForm);
+    fireStamp();
+  };
+  const deleteHolding = id => {
+    setHoldings(prev => prev.filter(h => h.id !== id));
+    if (editingHoldingId === id) {
+      setEditingHoldingId(null);
+      setHForm(blankHForm);
+    }
+  };
+  const startEditHolding = h => {
+    setHForm({
+      name: h.name,
+      accountType: h.accountType,
+      currency: h.currency,
+      quantity: String(h.quantity),
+      avgCost: String(h.avgCost),
+      currentPrice: String(h.currentPrice),
+      autoContribute: !!h.autoContribute,
+      contributionAmount: h.contributionAmount ? String(h.contributionAmount) : "",
+      contributionFrequency: h.contributionFrequency || "yearly",
+      nextContributionDate: h.nextContributionDate || new Date().toISOString().slice(0, 10)
+    });
+    setEditingHoldingId(h.id);
+  };
+  const cancelEditHolding = () => {
+    setEditingHoldingId(null);
+    setHForm(blankHForm);
+  };
+
+  // ---- Free, no-key auto-fetch for the exchange rate; a free "search"
+  // shortcut (no API, no cost) for stock/fund prices, which don't have a
+  // reliable free no-key API covering Japanese mutual funds. ----
+  const [fxLoading, setFxLoading] = useState(false);
+  const [fxUpdatedAt, setFxUpdatedAt] = useState(null);
+  const [fxError, setFxError] = useState("");
+  const [priceError, setPriceError] = useState("");
+  const fetchFxRate = async () => {
+    setFxLoading(true);
+    setFxError("");
+    try {
+      const res = await fetch("https://api.frankfurter.app/latest?from=USD&to=JPY");
+      if (!res.ok) throw new Error(`為替APIエラー（${res.status}）`);
+      const data = await res.json();
+      const rate = data && data.rates && data.rates.JPY;
+      if (typeof rate === "number" && rate > 0) {
+        setFx(rate);
+        setFxUpdatedAt(new Date());
+      } else {
+        throw new Error("為替レートの形式が想定と異なります");
+      }
+    } catch (e) {
+      setFxError(e && e.message ? e.message : "取得に失敗しました。時間をおいて再度お試しください。");
+    }
+    setFxLoading(false);
+  };
+
+  // No API call — just opens a search in a new tab so the user can look up
+  // the current price for free and type it in manually.
+  const openPriceSearch = holding => {
+    const query = encodeURIComponent(`${holding.name} 株価 基準価額`);
+    window.open(`https://www.google.com/search?q=${query}`, "_blank", "noopener");
+  };
+  const toJPY = h => h.currency === "USD" ? fx : 1;
+  const holdingsWithValue = useMemo(() => holdings.map(h => {
+    const rate = toJPY(h);
+    const value = h.quantity * h.currentPrice * rate;
+    const cost = h.quantity * h.avgCost * rate;
+    return {
+      ...h,
+      value,
+      cost,
+      gain: value - cost
+    };
+  }), [holdings, fx]);
+  const totalPortfolioValue = useMemo(() => holdingsWithValue.reduce((s, h) => s + h.value, 0), [holdingsWithValue]);
+  const totalGain = useMemo(() => holdingsWithValue.reduce((s, h) => s + h.gain, 0), [holdingsWithValue]);
+  const allocationData = useMemo(() => {
+    const map = {};
+    holdingsWithValue.forEach(h => {
+      map[h.accountType] = (map[h.accountType] || 0) + h.value;
+    });
+    return Object.entries(map).map(([name, value]) => ({
+      name,
+      value
+    }));
+  }, [holdingsWithValue]);
+  const netWorth = cashBalance + totalPortfolioValue;
+  return /*#__PURE__*/React.createElement("div", {
+    className: "min-h-screen w-full overflow-x-hidden",
+    style: {
+      background: T.paper,
+      color: T.ink,
+      fontFamily: '"Hiragino Kaku Gothic ProN","Yu Gothic",sans-serif'
+    }
+  }, /*#__PURE__*/React.createElement(HankoStamp, {
+    show: stamp > 0,
+    key: stamp
+  }), /*#__PURE__*/React.createElement("style", null, `
+        input[type=number]::-webkit-inner-spin-button,
+        input[type=number]::-webkit-outer-spin-button {
+          -webkit-appearance: none;
+          margin: 0;
+        }
+        input[type=number] {
+          -moz-appearance: textfield;
+          appearance: textfield;
+        }
+      `), /*#__PURE__*/React.createElement("div", {
+    className: "w-full max-w-3xl mx-auto p-4 md:p-8 box-border"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center justify-between mb-5"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center gap-3"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "flex items-center justify-center font-semibold rounded-2xl",
+    style: {
+      width: 36,
+      height: 36,
+      fontSize: 18,
+      background: `${T.brass}22`,
+      color: T.brass,
+      border: `1px solid ${T.brass}`,
+      boxShadow: GLOW(T.brass, "40")
+    }
+  }, "帳"), /*#__PURE__*/React.createElement("span", {
+    className: "text-xs font-bold",
+    style: {
+      color: T.inkSoft
+    }
+  }, "家計簿 & 資産台帳")), /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center gap-3"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowBackup(v => !v),
+    className: "text-xs font-bold",
+    style: {
+      color: T.navy
+    }
+  }, "バックアップ"), /*#__PURE__*/React.createElement("span", {
+    className: "text-xs font-bold",
+    style: {
+      color: saveStatus.ok ? T.inkSoft : T.hanko
+    }
+  }, saveStatus.ok ? saveStatus.at ? `保存済 ${saveStatus.at.toLocaleTimeString("ja-JP", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  })}` : "" : "⚠ 保存失敗"))), !saveStatus.ok && saveStatus.message && /*#__PURE__*/React.createElement("div", {
+    className: "mb-4 px-3 py-2 rounded-2xl text-xs",
+    style: {
+      background: "rgba(251,113,133,0.12)",
+      color: T.hanko,
+      border: `1px solid ${T.hanko}`
+    }
+  }, saveStatus.message), showBackup && /*#__PURE__*/React.createElement("div", {
+    className: "mb-6 p-4 rounded-2xl",
+    style: {
+      background: T.glass,
+      border: `1px solid ${T.rule}`,
+      boxShadow: SHADOW()
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "text-xs font-bold mb-2",
+    style: {
+      color: T.inkSoft
+    }
+  }, "自動保存が不安定な場合の手動バックアップです。下の内容を全選択してコピーし、メモアプリ等に保管してください。"), /*#__PURE__*/React.createElement("textarea", {
+    readOnly: true,
+    value: JSON.stringify({
+      transactions,
+      holdings,
+      fx,
+      categories
+    }, null, 2),
+    onFocus: e => e.target.select(),
+    className: "w-full text-xs rounded-2xl p-2 mb-3",
+    style: {
+      ...inputStyle,
+      height: 120,
+      fontFamily: '"SF Mono","Menlo",monospace',
+      resize: "vertical"
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "text-xs font-bold mb-2",
+    style: {
+      color: T.inkSoft
+    }
+  }, "バックアップから復元する場合は、保存しておいたJSONをここに貼り付けてください。"), /*#__PURE__*/React.createElement("textarea", {
+    value: restoreText,
+    onChange: e => setRestoreText(e.target.value),
+    placeholder: "ここにJSONを貼り付け",
+    className: "w-full text-xs rounded-2xl p-2 mb-3",
+    style: {
+      ...inputStyle,
+      height: 100,
+      fontFamily: '"SF Mono","Menlo",monospace',
+      resize: "vertical"
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center gap-3"
+  }, /*#__PURE__*/React.createElement(StampButton, {
+    tone: "navy",
+    onClick: () => {
+      try {
+        const parsed = JSON.parse(restoreText);
+        setTransactions(parsed.transactions || []);
+        setHoldings(parsed.holdings || []);
+        setFx(parsed.fx || 150);
+        setCategories(parsed.categories || {
+          expense: DEFAULT_EXPENSE_CATS,
+          income: DEFAULT_INCOME_CATS
+        });
+        setRestoreMessage("復元しました");
+        setRestoreText("");
+      } catch (e) {
+        setRestoreMessage("JSONの読み取りに失敗しました");
+      }
+    }
+  }, "復元する"), restoreMessage && /*#__PURE__*/React.createElement("span", {
+    className: "text-xs",
+    style: {
+      color: T.inkSoft
+    }
+  }, restoreMessage))), /*#__PURE__*/React.createElement("div", {
+    className: "grid grid-cols-3 gap-2 mb-6"
+  }, [{
+    id: "overview",
+    label: "概況",
+    icon: LayoutDashboard
+  }, {
+    id: "ledger",
+    label: "家計簿",
+    icon: BookOpen
+  }, {
+    id: "portfolio",
+    label: "資産管理",
+    icon: Landmark
+  }].map(({
+    id,
+    label,
+    icon: Icon
+  }) => /*#__PURE__*/React.createElement("button", {
+    key: id,
+    onClick: () => setTab(id),
+    className: "flex flex-col items-center justify-center gap-1 py-2.5 rounded-2xl text-xs font-semibold whitespace-nowrap transition-all",
+    style: {
+      background: tab === id ? `${T.navy}22` : "rgba(255,255,255,0.04)",
+      color: tab === id ? T.navy : T.inkSoft,
+      border: `1px solid ${tab === id ? T.navy : T.rule}`,
+      boxShadow: tab === id ? GLOW(T.navy) : "none"
+    }
+  }, /*#__PURE__*/React.createElement(Icon, {
+    size: 18
+  }), label))), tab === "overview" && /*#__PURE__*/React.createElement(Overview, {
+    netWorth: netWorth,
+    cashBalance: cashBalance,
+    totalPortfolioValue: totalPortfolioValue,
+    totalGain: totalGain,
+    monthlyData: monthlyData
+  }), tab === "ledger" && /*#__PURE__*/React.createElement(Ledger, {
+    txForm: txForm,
+    setTxForm: setTxForm,
+    saveTransaction: saveTransaction,
+    transactions: transactions,
+    deleteTransaction: deleteTransaction,
+    categories: categories,
+    setCategories: setCategories,
+    editingTxId: editingTxId,
+    startEditTransaction: startEditTransaction,
+    cancelEditTransaction: cancelEditTransaction,
+    subView: ledgerSubView,
+    setSubView: setLedgerSubView,
+    selectedDate: selectedDate,
+    setSelectedDate: setSelectedDate
+  }), tab === "portfolio" && /*#__PURE__*/React.createElement(Portfolio, {
+    hForm: hForm,
+    setHForm: setHForm,
+    saveHolding: saveHolding,
+    holdingsWithValue: holdingsWithValue,
+    deleteHolding: deleteHolding,
+    allocationData: allocationData,
+    totalPortfolioValue: totalPortfolioValue,
+    totalGain: totalGain,
+    fx: fx,
+    setFx: setFx,
+    fxLoading: fxLoading,
+    fxUpdatedAt: fxUpdatedAt,
+    fxError: fxError,
+    onFetchFx: fetchFxRate,
+    priceError: priceError,
+    onOpenPriceSearch: openPriceSearch,
+    editingHoldingId: editingHoldingId,
+    startEditHolding: startEditHolding,
+    cancelEditHolding: cancelEditHolding,
+    contribBanner: contribBanner,
+    onDismissContribBanner: () => setContribBanner(null)
+  })));
+}
+function SectionTitle({
+  children,
+  sub
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    className: "mb-6"
+  }, /*#__PURE__*/React.createElement("h1", {
+    className: "text-2xl md:text-3xl font-semibold",
+    style: {
+      color: T.ink
+    }
+  }, children), sub && /*#__PURE__*/React.createElement("p", {
+    className: "text-sm mt-1 font-bold",
+    style: {
+      color: T.inkSoft
+    }
+  }, sub));
+}
+function StatCard({
+  label,
+  value,
+  accent
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    className: "p-4 rounded-2xl",
+    style: {
+      background: T.glass,
+      border: `1px solid ${T.rule}`,
+      boxShadow: SHADOW()
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "text-xs font-bold",
+    style: {
+      color: T.inkSoft
+    }
+  }, label), /*#__PURE__*/React.createElement("div", {
+    className: "text-lg md:text-2xl font-semibold mt-1",
+    style: {
+      fontFamily: '"SF Mono","Menlo",monospace',
+      color: accent || T.ink
+    }
+  }, value));
+}
+function Overview({
+  netWorth,
+  cashBalance,
+  totalPortfolioValue,
+  totalGain,
+  monthlyData
+}) {
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(SectionTitle, {
+    sub: "家計と資産の全体像"
+  }, "概況"), /*#__PURE__*/React.createElement("div", {
+    className: "grid grid-cols-2 md:grid-cols-4 gap-3 mb-8"
+  }, /*#__PURE__*/React.createElement(StatCard, {
+    label: "純資産",
+    value: yen(netWorth),
+    accent: T.navy
+  }), /*#__PURE__*/React.createElement(StatCard, {
+    label: "現金収支残高",
+    value: yen(cashBalance)
+  }), /*#__PURE__*/React.createElement(StatCard, {
+    label: "投資評価額",
+    value: yen(totalPortfolioValue),
+    accent: T.brass
+  }), /*#__PURE__*/React.createElement(StatCard, {
+    label: "評価損益",
+    value: (totalGain >= 0 ? "+" : "") + yen(totalGain),
+    accent: totalGain >= 0 ? T.navy : T.hanko
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "p-4 md:p-6 rounded-2xl",
+    style: {
+      background: T.glass,
+      border: `1px solid ${T.rule}`,
+      boxShadow: SHADOW()
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "text-sm font-semibold mb-3",
+    style: {
+      color: T.ink
+    }
+  }, "月次収支（直近6ヶ月）"), monthlyData.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    className: "text-sm py-8 text-center font-bold",
+    style: {
+      color: T.inkSoft
+    }
+  }, "まだ記録がありません。「家計簿」タブから記帳してください。") : /*#__PURE__*/React.createElement("div", {
+    className: "flex flex-col gap-2.5"
+  }, monthlyData.map(m => /*#__PURE__*/React.createElement("div", {
+    key: m.month,
+    className: "flex items-center gap-2 text-xs"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "flex-shrink-0 font-bold",
+    style: {
+      width: 44,
+      color: T.ink
+    }
+  }, m.month.slice(2)), /*#__PURE__*/React.createElement("div", {
+    className: "flex-1 min-w-0 flex flex-col gap-1"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "h-2 rounded-full overflow-hidden",
+    style: {
+      background: "rgba(255,255,255,0.08)"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "h-full rounded-full",
+    style: {
+      width: `${Math.min(100, m.収入 / (Math.max(m.収入, m.支出) || 1) * 100)}%`,
+      background: T.navy,
+      boxShadow: GLOW(T.navy, "60")
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "h-2 rounded-full overflow-hidden",
+    style: {
+      background: "rgba(255,255,255,0.08)"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "h-full rounded-full",
+    style: {
+      width: `${Math.min(100, m.支出 / (Math.max(m.収入, m.支出) || 1) * 100)}%`,
+      background: T.hanko,
+      boxShadow: GLOW(T.hanko, "60")
+    }
+  }))), /*#__PURE__*/React.createElement("span", {
+    className: "flex-shrink-0 text-right font-bold",
+    style: {
+      width: 68,
+      fontSize: 11,
+      fontFamily: '"SF Mono","Menlo",monospace',
+      color: T.navy
+    }
+  }, yen(m.収入)), /*#__PURE__*/React.createElement("span", {
+    className: "flex-shrink-0 text-right font-bold",
+    style: {
+      width: 68,
+      fontSize: 11,
+      fontFamily: '"SF Mono","Menlo",monospace',
+      color: T.hanko
+    }
+  }, yen(m.支出)))))));
+}
+function CategoryGrid({
+  cats,
+  value,
+  onChange
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    className: "grid grid-cols-3 gap-2"
+  }, cats.map(c => {
+    const Icon = categoryIcon(c);
+    const active = c === value;
+    const accent = catColor(c, cats);
+    return /*#__PURE__*/React.createElement("button", {
+      key: c,
+      onClick: () => onChange(c),
+      className: "flex flex-col items-center justify-center gap-1.5 py-3 rounded-2xl text-xs font-semibold transition-all",
+      style: {
+        background: active ? `${accent}22` : "rgba(255,255,255,0.04)",
+        color: active ? accent : T.inkSoft,
+        border: `1px solid ${active ? accent : T.rule}`,
+        boxShadow: active ? GLOW(accent) : "none"
+      }
+    }, /*#__PURE__*/React.createElement(Icon, {
+      size: 20,
+      style: {
+        color: accent
+      }
+    }), c);
+  }));
+}
+function CategorySettings({
+  categories,
+  setCategories,
+  txForm,
+  setTxForm
+}) {
+  const [newCat, setNewCat] = useState({
+    expense: "",
+    income: ""
+  });
+  const addCategory = type => {
+    const name = newCat[type].trim();
+    if (!name || categories[type].includes(name)) return;
+    setCategories(prev => ({
+      ...prev,
+      [type]: [...prev[type], name]
+    }));
+    setNewCat(f => ({
+      ...f,
+      [type]: ""
+    }));
+  };
+  const removeCategory = (type, name) => {
+    const remaining = categories[type].filter(c => c !== name);
+    setCategories(prev => ({
+      ...prev,
+      [type]: remaining
+    }));
+    if (txForm.category === name && txForm.type === type) {
+      setTxForm(f => ({
+        ...f,
+        category: remaining[0] || ""
+      }));
+    }
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    className: "p-4 rounded-2xl mb-4 grid md:grid-cols-2 gap-4",
+    style: {
+      background: T.glass,
+      border: `1px solid ${T.rule}`,
+      boxShadow: SHADOW()
+    }
+  }, ["expense", "income"].map(type => /*#__PURE__*/React.createElement("div", {
+    key: type
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "text-xs font-bold mb-2",
+    style: {
+      color: T.inkSoft
+    }
+  }, type === "expense" ? "支出カテゴリ" : "収入カテゴリ"), /*#__PURE__*/React.createElement("div", {
+    className: "flex flex-wrap gap-1.5 mb-2"
+  }, categories[type].map(c => /*#__PURE__*/React.createElement("span", {
+    key: c,
+    className: "flex items-center gap-1 px-2 py-1 rounded-2xl text-xs",
+    style: {
+      background: "rgba(255,255,255,0.08)",
+      border: `1px solid ${T.rule}`
+    }
+  }, c, /*#__PURE__*/React.createElement("button", {
+    onClick: () => removeCategory(type, c),
+    style: {
+      color: T.inkSoft
+    }
+  }, /*#__PURE__*/React.createElement(X, {
+    size: 11
+  }))))), /*#__PURE__*/React.createElement("div", {
+    className: "flex gap-1.5"
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "text",
+    value: newCat[type],
+    onChange: e => setNewCat(f => ({
+      ...f,
+      [type]: e.target.value
+    })),
+    placeholder: "新しいカテゴリ",
+    className: "px-2 py-1 rounded-2xl text-xs flex-1",
+    style: inputStyle,
+    onKeyDown: e => {
+      if (e.key === "Enter") addCategory(type);
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: () => addCategory(type),
+    className: "px-2 py-1 rounded-2xl text-xs",
+    style: {
+      background: T.navy,
+      color: T.cream
+    }
+  }, "追加")))));
+}
+function LedgerInput({
+  txForm,
+  setTxForm,
+  saveTransaction,
+  categories,
+  setCategories,
+  editingTxId,
+  cancelEditTransaction
+}) {
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const cats = txForm.type === "income" ? categories.income : categories.expense;
+  return /*#__PURE__*/React.createElement("div", null, editingTxId && /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center justify-between mb-4 px-3 py-2 rounded-2xl text-xs",
+    style: {
+      background: `${T.brass}1F`,
+      color: T.brass,
+      border: `1px solid ${T.brass}`,
+      boxShadow: GLOW(T.brass, '35')
+    }
+  }, /*#__PURE__*/React.createElement("span", null, "この記帳を編集中です"), /*#__PURE__*/React.createElement("button", {
+    onClick: cancelEditTransaction,
+    className: "font-bold",
+    style: {
+      color: T.hanko
+    }
+  }, "キャンセル")), /*#__PURE__*/React.createElement("div", {
+    className: "flex rounded-full overflow-hidden mb-5 w-fit",
+    style: {
+      border: `1px solid ${T.rule}`,
+      boxShadow: SHADOW_SM()
+    }
+  }, [["expense", "支出"], ["income", "収入"]].map(([id, label]) => {
+    const accent = id === "income" ? T.navy : T.hanko;
+    const active = txForm.type === id;
+    return /*#__PURE__*/React.createElement("button", {
+      key: id,
+      onClick: () => {
+        const nextCats = id === "income" ? categories.income : categories.expense;
+        setTxForm(f => ({
+          ...f,
+          type: id,
+          category: nextCats[0] || ""
+        }));
+      },
+      className: "px-6 py-2 text-sm font-semibold",
+      style: {
+        background: active ? `${accent}22` : "transparent",
+        color: active ? accent : T.inkSoft
+      }
+    }, label);
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center gap-3 mb-4"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setTxForm(f => ({
+      ...f,
+      date: shiftDay(f.date, -1)
+    })),
+    style: {
+      color: T.inkSoft
+    }
+  }, /*#__PURE__*/React.createElement(ChevronLeft, {
+    size: 18
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "relative px-4 py-2 rounded-2xl text-sm font-bold flex-1 text-center",
+    style: {
+      background: T.glass,
+      border: `1px solid ${T.rule}`,
+      boxShadow: SHADOW()
+    }
+  }, formatDateJP(txForm.date), /*#__PURE__*/React.createElement("input", {
+    type: "date",
+    value: txForm.date,
+    onChange: e => setTxForm(f => ({
+      ...f,
+      date: e.target.value
+    })),
+    className: "absolute inset-0 opacity-0 cursor-pointer"
+  })), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setTxForm(f => ({
+      ...f,
+      date: shiftDay(f.date, 1)
+    })),
+    style: {
+      color: T.inkSoft
+    }
+  }, /*#__PURE__*/React.createElement(ChevronRight, {
+    size: 18
+  }))), /*#__PURE__*/React.createElement("div", {
+    className: "mb-4"
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "メモ"
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "text",
+    placeholder: "未入力",
+    value: txForm.memo,
+    onChange: e => setTxForm(f => ({
+      ...f,
+      memo: e.target.value
+    })),
+    className: "px-3 py-2 rounded-2xl text-sm w-full",
+    style: inputStyle
+  }))), /*#__PURE__*/React.createElement("div", {
+    className: "mb-5"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "text-xs mb-1",
+    style: {
+      color: T.inkSoft
+    }
+  }, txForm.type === "income" ? "収入" : "支出"), /*#__PURE__*/React.createElement("div", {
+    className: "flex items-baseline gap-2 px-3 py-3 rounded-2xl",
+    style: {
+      background: T.glass,
+      border: `1px solid ${T.rule}`,
+      boxShadow: SHADOW()
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    placeholder: "0",
+    value: txForm.amount,
+    onChange: e => setTxForm(f => ({
+      ...f,
+      amount: e.target.value
+    })),
+    className: "text-3xl font-bold flex-1 text-right bg-transparent outline-none",
+    style: {
+      color: T.ink,
+      fontFamily: '"SF Mono","Menlo",monospace'
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    className: "text-sm",
+    style: {
+      color: T.inkSoft
+    }
+  }, "円"))), /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center justify-between mb-2"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "text-xs font-bold",
+    style: {
+      color: T.inkSoft
+    }
+  }, "カテゴリー"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setSettingsOpen(o => !o),
+    className: "flex items-center gap-1 text-xs",
+    style: {
+      color: T.inkSoft
+    }
+  }, /*#__PURE__*/React.createElement(Settings, {
+    size: 12
+  }), "編集")), /*#__PURE__*/React.createElement("div", {
+    className: "mb-4"
+  }, /*#__PURE__*/React.createElement(CategoryGrid, {
+    cats: cats,
+    value: txForm.category,
+    onChange: c => setTxForm(f => ({
+      ...f,
+      category: c
+    }))
+  })), settingsOpen && /*#__PURE__*/React.createElement(CategorySettings, {
+    categories: categories,
+    setCategories: setCategories,
+    txForm: txForm,
+    setTxForm: setTxForm
+  }), /*#__PURE__*/React.createElement(StampButton, {
+    onClick: saveTransaction,
+    tone: txForm.type === "income" ? "navy" : "hanko",
+    full: true
+  }, /*#__PURE__*/React.createElement(Plus, {
+    size: 16
+  }), editingTxId ? "変更を保存する" : txForm.type === "income" ? "収入を入力する" : "支出を入力する"));
+}
+function LedgerCalendar({
+  transactions,
+  categories,
+  deleteTransaction,
+  selectedDate,
+  setSelectedDate,
+  startEditTransaction
+}) {
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const calMonth = selectedDate.slice(0, 7);
+  const navigateMonth = delta => {
+    const nextMonth = shiftMonth(calMonth, delta);
+    setSelectedDate(`${nextMonth}-01`);
+  };
+  const dayTotals = useMemo(() => {
+    const map = {};
+    transactions.forEach(t => {
+      if (monthKey(t.date) !== calMonth) return;
+      if (!map[t.date]) map[t.date] = {
+        income: 0,
+        expense: 0
+      };
+      map[t.date][t.type] += t.amount;
+    });
+    return map;
+  }, [transactions, calMonth]);
+  const calendarCells = useMemo(() => {
+    const [y, m] = calMonth.split("-").map(Number);
+    const mondayIndex = (new Date(y, m - 1, 1).getDay() + 6) % 7;
+    const total = daysInMonth(calMonth);
+    const arr = [];
+    for (let i = 0; i < mondayIndex; i++) arr.push(null);
+    for (let d = 1; d <= total; d++) arr.push(d);
+    while (arr.length % 7 !== 0) arr.push(null);
+    return arr;
+  }, [calMonth]);
+  const monthIncome = useMemo(() => Object.values(dayTotals).reduce((s, d) => s + d.income, 0), [dayTotals]);
+  const monthExpense = useMemo(() => Object.values(dayTotals).reduce((s, d) => s + d.expense, 0), [dayTotals]);
+  const dayTransactions = useMemo(() => transactions.filter(t => t.date === selectedDate), [transactions, selectedDate]);
+  const dayTotal = dayTransactions.reduce((s, t) => s + (t.type === "income" ? t.amount : -t.amount), 0);
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center justify-between mb-3"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => navigateMonth(-1),
+    style: {
+      color: T.inkSoft
+    }
+  }, /*#__PURE__*/React.createElement(ChevronLeft, {
+    size: 18
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "text-base font-semibold",
+    style: {
+      color: T.ink
+    }
+  }, calMonth.replace("-", "年"), "月"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => navigateMonth(1),
+    style: {
+      color: T.inkSoft
+    }
+  }, /*#__PURE__*/React.createElement(ChevronRight, {
+    size: 18
+  }))), /*#__PURE__*/React.createElement("div", {
+    className: "grid grid-cols-7 gap-1 text-center text-xs font-bold mb-1.5"
+  }, WEEKDAY_MON_FIRST.map((w, i) => /*#__PURE__*/React.createElement("div", {
+    key: w,
+    style: {
+      color: i === 5 ? T.navy : i === 6 ? T.hanko : T.ink
+    }
+  }, w))), /*#__PURE__*/React.createElement("div", {
+    className: "grid grid-cols-7 gap-1 mb-4"
+  }, calendarCells.map((d, i) => {
+    if (!d) return /*#__PURE__*/React.createElement("div", {
+      key: i
+    });
+    const dateStr = `${calMonth}-${pad(d)}`;
+    const totals = dayTotals[dateStr];
+    const selected = dateStr === selectedDate;
+    const isToday = dateStr === todayStr;
+    const weekdayIdx = i % 7;
+    return /*#__PURE__*/React.createElement("button", {
+      key: i,
+      onClick: () => setSelectedDate(dateStr),
+      className: "flex flex-col justify-between p-1 rounded-2xl text-left",
+      style: {
+        minHeight: 58,
+        background: selected ? `${T.brass}22` : "rgba(255,255,255,0.04)",
+        border: `1px solid ${selected ? T.brass : isToday ? T.navy : T.rule}`,
+        boxShadow: selected ? GLOW(T.brass) : isToday ? GLOW(T.navy, "35") : "none"
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      className: "text-xs font-bold",
+      style: {
+        color: weekdayIdx === 5 ? T.navy : weekdayIdx === 6 ? T.hanko : T.ink
+      }
+    }, d), /*#__PURE__*/React.createElement("div", {
+      className: "flex flex-col items-end leading-tight"
+    }, totals?.income > 0 && /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 10,
+        color: T.navy,
+        fontFamily: '"SF Mono","Menlo",monospace'
+      }
+    }, totals.income.toLocaleString()), totals?.expense > 0 && /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 10,
+        color: T.hanko,
+        fontFamily: '"SF Mono","Menlo",monospace'
+      }
+    }, totals.expense.toLocaleString())));
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "grid grid-cols-3 gap-2 mb-6"
+  }, /*#__PURE__*/React.createElement(StatCard, {
+    label: "収入",
+    value: yen(monthIncome),
+    accent: T.navy
+  }), /*#__PURE__*/React.createElement(StatCard, {
+    label: "支出",
+    value: yen(monthExpense),
+    accent: T.hanko
+  }), /*#__PURE__*/React.createElement(StatCard, {
+    label: "収支",
+    value: (monthIncome - monthExpense >= 0 ? "+" : "") + yen(monthIncome - monthExpense)
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center justify-between mb-2"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "text-sm font-bold",
+    style: {
+      color: T.navyDeep
+    }
+  }, formatDateJP(selectedDate)), /*#__PURE__*/React.createElement("div", {
+    className: "text-sm font-bold",
+    style: {
+      fontFamily: '"SF Mono","Menlo",monospace',
+      color: dayTotal >= 0 ? T.navy : T.hanko
+    }
+  }, dayTotal >= 0 ? "+" : "", yen(dayTotal))), /*#__PURE__*/React.createElement(LedgerLines, null, /*#__PURE__*/React.createElement("div", {
+    className: "divide-y",
+    style: {
+      borderColor: T.rule
+    }
+  }, dayTransactions.length === 0 && /*#__PURE__*/React.createElement("div", {
+    className: "text-sm py-8 text-center",
+    style: {
+      color: T.inkSoft
+    }
+  }, "この日の記帳はありません"), dayTransactions.map(t => {
+    const Icon = categoryIcon(t.category);
+    const list = t.type === "income" ? categories.income : categories.expense;
+    return /*#__PURE__*/React.createElement("div", {
+      key: t.id,
+      className: "flex items-center justify-between gap-2 px-3 py-2"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "min-w-0 flex-1 flex items-center gap-2 text-sm overflow-hidden"
+    }, /*#__PURE__*/React.createElement(Icon, {
+      size: 16,
+      className: "flex-shrink-0",
+      style: {
+        color: catColor(t.category, list)
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      className: "truncate"
+    }, t.category, t.memo && /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: T.inkSoft
+      }
+    }, "（", t.memo, "）"))), /*#__PURE__*/React.createElement("div", {
+      className: "flex items-center gap-3 flex-shrink-0"
+    }, /*#__PURE__*/React.createElement("span", {
+      className: "text-sm font-bold",
+      style: {
+        fontFamily: '"SF Mono","Menlo",monospace',
+        color: t.type === "income" ? T.navy : T.hanko
+      }
+    }, t.type === "income" ? "+" : "-", yen(t.amount)), /*#__PURE__*/React.createElement("button", {
+      onClick: () => startEditTransaction(t),
+      style: {
+        color: T.inkSoft
+      }
+    }, /*#__PURE__*/React.createElement(Pencil, {
+      size: 13
+    })), /*#__PURE__*/React.createElement("button", {
+      onClick: () => deleteTransaction(t.id),
+      style: {
+        color: T.inkSoft
+      }
+    }, /*#__PURE__*/React.createElement(Trash2, {
+      size: 14
+    }))));
+  }))));
+}
+function LedgerReport({
+  transactions,
+  categories
+}) {
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const [reportType, setReportType] = useState("month");
+  const [reportValue, setReportValue] = useState(todayStr.slice(0, 7));
+  const [breakdownType, setBreakdownType] = useState("expense");
+  const switchReportType = type => {
+    setReportType(type);
+    setReportValue(type === "month" ? todayStr.slice(0, 7) : todayStr.slice(0, 4));
+  };
+  const shiftReport = delta => {
+    setReportValue(v => reportType === "month" ? shiftMonth(v, delta) : shiftYear(v, delta));
+  };
+  const reportLabel = reportType === "month" ? reportValue.replace("-", "年") + "月" : reportValue + "年";
+  const filtered = useMemo(() => transactions.filter(t => reportType === "month" ? monthKey(t.date) === reportValue : t.date.slice(0, 4) === reportValue), [transactions, reportType, reportValue]);
+  const income = filtered.filter(t => t.type === "income").reduce((s, t) => s + t.amount, 0);
+  const expense = filtered.filter(t => t.type === "expense").reduce((s, t) => s + t.amount, 0);
+  const balance = income - expense;
+  const breakdown = useMemo(() => {
+    const list = filtered.filter(t => t.type === breakdownType);
+    const map = {};
+    list.forEach(t => {
+      map[t.category] = (map[t.category] || 0) + t.amount;
+    });
+    const total = Object.values(map).reduce((s, v) => s + v, 0);
+    return Object.entries(map).map(([name, value]) => ({
+      name,
+      value,
+      pct: total ? value / total * 100 : 0
+    })).sort((a, b) => b.value - a.value);
+  }, [filtered, breakdownType]);
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center justify-center mb-4"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex rounded-full overflow-hidden",
+    style: {
+      border: `1px solid ${T.rule}`,
+      boxShadow: SHADOW_SM()
+    }
+  }, [["month", "月間レポート"], ["year", "年間レポート"]].map(([id, label]) => /*#__PURE__*/React.createElement("button", {
+    key: id,
+    onClick: () => switchReportType(id),
+    className: "px-4 py-1.5 text-xs font-semibold",
+    style: {
+      background: reportType === id ? `${T.navy}22` : "transparent",
+      color: reportType === id ? T.navy : T.inkSoft
+    }
+  }, label)))), /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center justify-center gap-3 mb-5"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => shiftReport(-1),
+    style: {
+      color: T.ink
+    }
+  }, /*#__PURE__*/React.createElement(ChevronLeft, {
+    size: 18
+  })), /*#__PURE__*/React.createElement("span", {
+    className: "text-sm font-semibold",
+    style: {
+      fontFamily: '"SF Mono","Menlo",monospace'
+    }
+  }, reportLabel), /*#__PURE__*/React.createElement("button", {
+    onClick: () => shiftReport(1),
+    style: {
+      color: T.ink
+    }
+  }, /*#__PURE__*/React.createElement(ChevronRight, {
+    size: 18
+  }))), /*#__PURE__*/React.createElement("div", {
+    className: "grid grid-cols-2 gap-3 mb-3"
+  }, /*#__PURE__*/React.createElement(StatCard, {
+    label: "支出",
+    value: "-" + yen(expense),
+    accent: T.hanko
+  }), /*#__PURE__*/React.createElement(StatCard, {
+    label: "収入",
+    value: "+" + yen(income),
+    accent: T.navy
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "mb-6"
+  }, /*#__PURE__*/React.createElement(StatCard, {
+    label: "収支",
+    value: (balance >= 0 ? "+" : "") + yen(balance),
+    accent: balance >= 0 ? T.navy : T.hanko
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "flex justify-center mb-4"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex rounded-full overflow-hidden",
+    style: {
+      border: `1px solid ${T.rule}`,
+      boxShadow: SHADOW_SM()
+    }
+  }, [["expense", "支出"], ["income", "収入"]].map(([id, label]) => {
+    const accent = id === "income" ? T.navy : T.hanko;
+    const active = breakdownType === id;
+    return /*#__PURE__*/React.createElement("button", {
+      key: id,
+      onClick: () => setBreakdownType(id),
+      className: "px-6 py-1.5 text-xs font-semibold",
+      style: {
+        background: active ? `${accent}22` : "transparent",
+        color: active ? accent : T.inkSoft
+      }
+    }, label);
+  }))), breakdown.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    className: "text-sm py-10 text-center",
+    style: {
+      color: T.inkSoft
+    }
+  }, "データがありません") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    className: "flex justify-center py-2"
+  }, /*#__PURE__*/React.createElement(DonutChart, {
+    data: breakdown,
+    colorFor: name => catColor(name, breakdownType === "expense" ? categories.expense : categories.income),
+    size: 200
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "flex flex-col mt-2"
+  }, breakdown.map(d => {
+    const Icon = categoryIcon(d.name);
+    return /*#__PURE__*/React.createElement("div", {
+      key: d.name,
+      className: "flex items-center justify-between gap-2 py-2.5",
+      style: {
+        borderBottom: `1px solid ${T.rule}`
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "min-w-0 flex-1 flex items-center gap-2 text-sm overflow-hidden"
+    }, /*#__PURE__*/React.createElement(Icon, {
+      size: 16,
+      className: "flex-shrink-0",
+      style: {
+        color: catColor(d.name, breakdownType === "expense" ? categories.expense : categories.income)
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      className: "truncate"
+    }, d.name)), /*#__PURE__*/React.createElement("div", {
+      className: "flex items-center gap-3 text-sm flex-shrink-0"
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: '"SF Mono","Menlo",monospace'
+      }
+    }, yen(d.value)), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: T.inkSoft,
+        width: 40,
+        textAlign: "right"
+      }
+    }, d.pct.toFixed(1), "%")));
+  }))));
+}
+function Ledger({
+  txForm,
+  setTxForm,
+  saveTransaction,
+  transactions,
+  deleteTransaction,
+  categories,
+  setCategories,
+  editingTxId,
+  startEditTransaction,
+  cancelEditTransaction,
+  subView,
+  setSubView,
+  selectedDate,
+  setSelectedDate
+}) {
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(SectionTitle, {
+    sub: "日々の記帳と支出の把握"
+  }, "家計簿"), /*#__PURE__*/React.createElement("div", {
+    className: "grid grid-cols-3 gap-2 mb-6"
+  }, [{
+    id: "input",
+    label: "入力",
+    icon: PenLine
+  }, {
+    id: "calendar",
+    label: "カレンダー",
+    icon: CalendarIcon
+  }, {
+    id: "report",
+    label: "レポート",
+    icon: PieChartIcon
+  }].map(({
+    id,
+    label,
+    icon: Icon
+  }) => /*#__PURE__*/React.createElement("button", {
+    key: id,
+    onClick: () => setSubView(id),
+    className: "flex flex-col items-center justify-center gap-1 py-2.5 rounded-2xl text-xs font-semibold whitespace-nowrap transition-all",
+    style: {
+      background: subView === id ? `${T.navy}22` : "rgba(255,255,255,0.04)",
+      color: subView === id ? T.navy : T.inkSoft,
+      border: `1px solid ${subView === id ? T.navy : T.rule}`,
+      boxShadow: subView === id ? GLOW(T.navy) : "none"
+    }
+  }, /*#__PURE__*/React.createElement(Icon, {
+    size: 16
+  }), label))), subView === "input" && /*#__PURE__*/React.createElement(LedgerInput, {
+    txForm: txForm,
+    setTxForm: setTxForm,
+    saveTransaction: saveTransaction,
+    categories: categories,
+    setCategories: setCategories,
+    editingTxId: editingTxId,
+    cancelEditTransaction: cancelEditTransaction
+  }), subView === "calendar" && /*#__PURE__*/React.createElement(LedgerCalendar, {
+    transactions: transactions,
+    categories: categories,
+    deleteTransaction: deleteTransaction,
+    selectedDate: selectedDate,
+    setSelectedDate: setSelectedDate,
+    startEditTransaction: startEditTransaction
+  }), subView === "report" && /*#__PURE__*/React.createElement(LedgerReport, {
+    transactions: transactions,
+    categories: categories
+  }));
+}
+function Portfolio({
+  hForm,
+  setHForm,
+  saveHolding,
+  holdingsWithValue,
+  deleteHolding,
+  allocationData,
+  totalPortfolioValue,
+  totalGain,
+  fx,
+  setFx,
+  fxLoading,
+  fxUpdatedAt,
+  fxError,
+  onFetchFx,
+  priceError,
+  onOpenPriceSearch,
+  editingHoldingId,
+  startEditHolding,
+  cancelEditHolding,
+  contribBanner,
+  onDismissContribBanner
+}) {
+  const [fxManual, setFxManual] = useState(false);
+  const timeStr = d => d ? d.toLocaleTimeString("ja-JP", {
+    hour: "2-digit",
+    minute: "2-digit"
+  }) : null;
+  const isContribAccount = hForm.accountType === "NISA" || hForm.accountType === "iDeCo";
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(SectionTitle, {
+    sub: "口座横断の資産台帳"
+  }, "資産管理"), contribBanner && /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center justify-between mb-4 px-3 py-2 rounded-2xl text-xs",
+    style: {
+      background: `${T.brass}1F`,
+      color: T.brass,
+      border: `1px solid ${T.brass}`,
+      boxShadow: GLOW(T.brass, '35')
+    }
+  }, /*#__PURE__*/React.createElement("span", null, "積立を", contribBanner.count, "件自動反映しました（合計", yen(contribBanner.total), "）"), /*#__PURE__*/React.createElement("button", {
+    onClick: onDismissContribBanner,
+    style: {
+      color: T.inkSoft
+    }
+  }, /*#__PURE__*/React.createElement(X, {
+    size: 14
+  }))), /*#__PURE__*/React.createElement("div", {
+    className: "grid grid-cols-2 md:grid-cols-3 gap-3 mb-6"
+  }, /*#__PURE__*/React.createElement(StatCard, {
+    label: "評価額合計",
+    value: yen(totalPortfolioValue),
+    accent: T.brass
+  }), /*#__PURE__*/React.createElement(StatCard, {
+    label: "評価損益",
+    value: (totalGain >= 0 ? "+" : "") + yen(totalGain),
+    accent: totalGain >= 0 ? T.navy : T.hanko
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "p-4 rounded-2xl",
+    style: {
+      background: T.glass,
+      border: `1px solid ${T.rule}`,
+      boxShadow: SHADOW()
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center justify-between"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "text-xs",
+    style: {
+      color: T.inkSoft
+    }
+  }, "USD/JPY レート"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setFxManual(v => !v),
+    style: {
+      color: T.inkSoft
+    }
+  }, /*#__PURE__*/React.createElement(Pencil, {
+    size: 11
+  }))), fxManual ? /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    value: fx,
+    onChange: e => setFx(Number(e.target.value) || 0),
+    className: "mt-1 px-2 py-1 rounded-2xl text-sm w-24",
+    style: inputStyle
+  }) : /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center gap-2 mt-1"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "text-lg font-bold",
+    style: {
+      fontFamily: '"SF Mono","Menlo",monospace'
+    }
+  }, fx), /*#__PURE__*/React.createElement("button", {
+    onClick: onFetchFx,
+    disabled: fxLoading,
+    className: "flex items-center gap-1 text-xs flex-shrink-0",
+    style: {
+      color: T.navy
+    }
+  }, /*#__PURE__*/React.createElement(RefreshCw, {
+    size: 12,
+    className: fxLoading ? "animate-spin" : ""
+  }), fxLoading ? "取得中" : "自動取得")), fxUpdatedAt && !fxManual && /*#__PURE__*/React.createElement("div", {
+    className: "mt-1",
+    style: {
+      fontSize: 10,
+      color: T.inkSoft
+    }
+  }, timeStr(fxUpdatedAt), "時点"), fxError && /*#__PURE__*/React.createElement("div", {
+    className: "mt-1",
+    style: {
+      fontSize: 10,
+      color: T.hanko
+    }
+  }, fxError))), /*#__PURE__*/React.createElement("div", {
+    className: "p-4 rounded-2xl mb-6",
+    style: {
+      background: T.glass,
+      border: `1px solid ${T.rule}`,
+      boxShadow: SHADOW()
+    }
+  }, editingHoldingId && /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center justify-between mb-3 px-3 py-2 rounded-2xl text-xs",
+    style: {
+      background: `${T.brass}1F`,
+      color: T.brass,
+      border: `1px solid ${T.brass}`,
+      boxShadow: GLOW(T.brass, '35')
+    }
+  }, /*#__PURE__*/React.createElement("span", null, "この資産を編集中です"), /*#__PURE__*/React.createElement("button", {
+    onClick: cancelEditHolding,
+    className: "font-bold",
+    style: {
+      color: T.hanko
+    }
+  }, "キャンセル")), /*#__PURE__*/React.createElement("div", {
+    className: "flex flex-wrap gap-3 items-end"
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "銘柄・資産名"
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "text",
+    placeholder: "例）eMAXIS Slim米国株式",
+    value: hForm.name,
+    onChange: e => setHForm(f => ({
+      ...f,
+      name: e.target.value
+    })),
+    className: "px-2 py-1.5 rounded-2xl text-sm w-44",
+    style: inputStyle
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "口座区分"
+  }, /*#__PURE__*/React.createElement("select", {
+    value: hForm.accountType,
+    onChange: e => setHForm(f => ({
+      ...f,
+      accountType: e.target.value
+    })),
+    className: "px-2 py-1.5 rounded-2xl text-sm",
+    style: inputStyle
+  }, ACCOUNT_TYPES.map(a => /*#__PURE__*/React.createElement("option", {
+    key: a,
+    value: a
+  }, a)))), /*#__PURE__*/React.createElement(Field, {
+    label: "通貨"
+  }, /*#__PURE__*/React.createElement("select", {
+    value: hForm.currency,
+    onChange: e => setHForm(f => ({
+      ...f,
+      currency: e.target.value
+    })),
+    className: "px-2 py-1.5 rounded-2xl text-sm",
+    style: inputStyle
+  }, /*#__PURE__*/React.createElement("option", {
+    value: "JPY"
+  }, "JPY"), /*#__PURE__*/React.createElement("option", {
+    value: "USD"
+  }, "USD"))), /*#__PURE__*/React.createElement(Field, {
+    label: "数量"
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    value: hForm.quantity,
+    onChange: e => setHForm(f => ({
+      ...f,
+      quantity: e.target.value
+    })),
+    className: "px-2 py-1.5 rounded-2xl text-sm w-20",
+    style: inputStyle
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "平均取得単価"
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    value: hForm.avgCost,
+    onChange: e => setHForm(f => ({
+      ...f,
+      avgCost: e.target.value
+    })),
+    className: "px-2 py-1.5 rounded-2xl text-sm w-24",
+    style: inputStyle
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "現在単価（空欄なら自動取得可）"
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    placeholder: "任意",
+    value: hForm.currentPrice,
+    onChange: e => setHForm(f => ({
+      ...f,
+      currentPrice: e.target.value
+    })),
+    className: "px-2 py-1.5 rounded-2xl text-sm w-24",
+    style: inputStyle
+  })), /*#__PURE__*/React.createElement(StampButton, {
+    onClick: saveHolding,
+    tone: "navy"
+  }, /*#__PURE__*/React.createElement(Plus, {
+    size: 16
+  }), editingHoldingId ? "変更を保存する" : "追加する")), isContribAccount && /*#__PURE__*/React.createElement("div", {
+    className: "mt-4 p-3 rounded-2xl",
+    style: {
+      background: "rgba(255,255,255,0.04)",
+      border: `1px dashed ${T.rule}`
+    }
+  }, /*#__PURE__*/React.createElement("label", {
+    className: "flex items-center gap-2 text-xs mb-2",
+    style: {
+      color: T.inkSoft
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: hForm.autoContribute,
+    onChange: e => setHForm(f => ({
+      ...f,
+      autoContribute: e.target.checked
+    }))
+  }), "自動積立を設定する（NISA / iDeCo）"), hForm.autoContribute && /*#__PURE__*/React.createElement("div", {
+    className: "flex flex-wrap gap-3 items-end"
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "積立額（円）"
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    placeholder: "例）120000",
+    value: hForm.contributionAmount,
+    onChange: e => setHForm(f => ({
+      ...f,
+      contributionAmount: e.target.value
+    })),
+    className: "px-2 py-1.5 rounded-2xl text-sm w-28",
+    style: inputStyle
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "頻度"
+  }, /*#__PURE__*/React.createElement("select", {
+    value: hForm.contributionFrequency,
+    onChange: e => setHForm(f => ({
+      ...f,
+      contributionFrequency: e.target.value
+    })),
+    className: "px-2 py-1.5 rounded-2xl text-sm",
+    style: inputStyle
+  }, /*#__PURE__*/React.createElement("option", {
+    value: "yearly"
+  }, "毎年"), /*#__PURE__*/React.createElement("option", {
+    value: "monthly"
+  }, "毎月"))), /*#__PURE__*/React.createElement(Field, {
+    label: "次回の積立日"
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "date",
+    value: hForm.nextContributionDate,
+    onChange: e => setHForm(f => ({
+      ...f,
+      nextContributionDate: e.target.value
+    })),
+    className: "px-2 py-1.5 rounded-2xl text-sm",
+    style: inputStyle
+  }))), /*#__PURE__*/React.createElement("div", {
+    className: "mt-2",
+    style: {
+      fontSize: 10,
+      color: T.inkSoft
+    }
+  }, "指定日を過ぎるとアプリを開いたタイミングで自動的に口数・平均取得単価に反映され、家計簿にも支出として記帳されます（現在単価を基準に概算します）。"))), /*#__PURE__*/React.createElement("div", {
+    className: "grid md:grid-cols-2 gap-6"
+  }, /*#__PURE__*/React.createElement("div", null, holdingsWithValue.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "mb-2",
+    style: {
+      fontSize: 10,
+      color: T.inkSoft
+    }
+  }, "価格は無料の検索リンク（各行の🔍）で確認し、手動で更新してください。"), priceError && /*#__PURE__*/React.createElement("div", {
+    className: "mb-2",
+    style: {
+      fontSize: 11,
+      color: T.hanko
+    }
+  }, priceError), holdingsWithValue.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    className: "text-sm py-10 text-center rounded-2xl",
+    style: {
+      color: T.inkSoft,
+      background: T.glass,
+      border: `1px solid ${T.rule}`
+    }
+  }, "保有資産が登録されていません") : /*#__PURE__*/React.createElement("div", {
+    className: "flex flex-col gap-2"
+  }, holdingsWithValue.map(h => /*#__PURE__*/React.createElement("div", {
+    key: h.id,
+    className: "p-3 rounded-2xl flex items-center justify-between gap-2",
+    style: {
+      background: T.glass,
+      border: `1px solid ${T.rule}`,
+      borderLeft: `3px solid ${ACCOUNT_COLORS[h.accountType]}`,
+      boxShadow: SHADOW()
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "min-w-0 flex-1"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "text-sm font-bold truncate"
+  }, h.name), /*#__PURE__*/React.createElement("div", {
+    className: "text-xs truncate",
+    style: {
+      color: T.inkSoft
+    }
+  }, h.accountType, " ・ ", h.quantity.toFixed(2), "口 ・ ", h.currency), h.autoContribute && h.contributionAmount > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "text-xs truncate",
+    style: {
+      color: T.brass
+    }
+  }, "積立: ", yen(h.contributionAmount), "/", h.contributionFrequency === "monthly" ? "月" : "年", " ・ 次回 ", h.nextContributionDate)), /*#__PURE__*/React.createElement("div", {
+    className: "text-right flex-shrink-0"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "text-sm font-bold",
+    style: {
+      fontFamily: '"SF Mono","Menlo",monospace'
+    }
+  }, yen(h.value)), /*#__PURE__*/React.createElement("div", {
+    className: "text-xs",
+    style: {
+      color: h.gain >= 0 ? T.navy : T.hanko
+    }
+  }, h.gain >= 0 ? "+" : "", yen(h.gain))), /*#__PURE__*/React.createElement("button", {
+    onClick: () => onOpenPriceSearch(h),
+    style: {
+      color: T.navy
+    },
+    className: "flex-shrink-0",
+    title: "価格を検索"
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13
+    }
+  }, "🔍")), /*#__PURE__*/React.createElement("button", {
+    onClick: () => startEditHolding(h),
+    style: {
+      color: T.inkSoft
+    },
+    className: "flex-shrink-0"
+  }, /*#__PURE__*/React.createElement(Pencil, {
+    size: 13
+  })), /*#__PURE__*/React.createElement("button", {
+    onClick: () => deleteHolding(h.id),
+    style: {
+      color: T.inkSoft
+    },
+    className: "flex-shrink-0"
+  }, /*#__PURE__*/React.createElement(Trash2, {
+    size: 14
+  })))))), /*#__PURE__*/React.createElement("div", {
+    className: "p-4 rounded-2xl",
+    style: {
+      background: T.glass,
+      border: `1px solid ${T.rule}`,
+      boxShadow: SHADOW()
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "text-sm font-bold mb-2",
+    style: {
+      color: T.inkSoft
+    }
+  }, "口座別配分"), allocationData.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    className: "text-sm py-10 text-center",
+    style: {
+      color: T.inkSoft
+    }
+  }, "データがありません") : /*#__PURE__*/React.createElement("div", {
+    className: "flex justify-center py-2"
+  }, /*#__PURE__*/React.createElement(DonutChart, {
+    data: allocationData,
+    colorFor: name => ACCOUNT_COLORS[name] || T.inkSoft,
+    size: 220
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "flex flex-wrap gap-3 mt-2"
+  }, allocationData.map(d => /*#__PURE__*/React.createElement("div", {
+    key: d.name,
+    className: "flex items-center gap-1.5 text-xs"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "w-2.5 h-2.5 rounded-full inline-block",
+    style: {
+      background: ACCOUNT_COLORS[d.name]
+    }
+  }), d.name))))));
+}
+try {
+  ReactDOM.createRoot(document.getElementById("root")).render(/*#__PURE__*/React.createElement(App, null));
+} catch (e) {
+  var box = document.getElementById("fallback-error");
+  if (box) {
+    box.style.display = "block";
+    box.textContent = "起動時にエラーが発生しました:\n" + (e && e.message ? e.message : String(e));
+  }
+}
+
+</script>
+</body>
+</html>
