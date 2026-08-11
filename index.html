@@ -340,12 +340,14 @@ function processAutoContributions(holdings, contribSettings, todayStr) {
           // to divide by, we can't know how many units the contribution
           // bought — guessing "1 yen per unit" previously caused quantity to
           // balloon into the hundreds of thousands over a few months.
-          const price = Number(h.currentPrice) > 0 ? Number(h.currentPrice) : Number(s.avgCost) > 0 ? Number(s.avgCost) : 0;
+          const rawPrice = Number(h.currentPrice) > 0 ? Number(h.currentPrice) : Number(s.avgCost) > 0 ? Number(s.avgCost) : 0;
+          const unitDivisor = h.priceUnit === "10000" ? 10000 : 1;
+          const price = rawPrice / unitDivisor;
           let memoNote = "";
           if (price > 0) {
             const addedQty = share / price;
             const newQty = s.qty + addedQty;
-            s.avgCost = newQty > 0 ? (s.qty * s.avgCost + addedQty * price) / newQty : s.avgCost;
+            s.avgCost = newQty > 0 ? (s.qty * s.avgCost + addedQty * rawPrice) / newQty : s.avgCost;
             s.qty = newQty;
           } else {
             memoNote = "（現在単価未設定のため口数は未反映）";
@@ -989,6 +991,7 @@ function App() {
     quantity: "",
     avgCost: "",
     currentPrice: "",
+    priceUnit: "10000",
     allocationPercent: "",
     valuationMethod: "manual",
     annualRent: "",
@@ -1048,6 +1051,7 @@ function App() {
       quantity: String(h.quantity),
       avgCost: String(h.avgCost),
       currentPrice: String(h.currentPrice),
+      priceUnit: h.priceUnit || "1",
       allocationPercent: h.allocationPercent ? String(h.allocationPercent) : "",
       valuationMethod: h.valuationMethod || "manual",
       annualRent: h.annualRent ? String(h.annualRent) : "",
@@ -1114,8 +1118,12 @@ function App() {
   const toJPY = h => h.currency === "USD" ? fx : 1;
   const holdingsWithValue = useMemo(() => holdings.map(h => {
     const rate = toJPY(h);
-    const value = h.quantity * h.currentPrice * rate;
-    const cost = h.quantity * h.avgCost * rate;
+    // Japanese mutual funds (投資信託) quote 基準価額/取得単価 per 10,000
+    // units by convention — treating it as a per-1-unit price inflates
+    // the value 10,000x. Individual stocks/ETFs are priced per 1 unit.
+    const unitDivisor = h.priceUnit === "10000" ? 10000 : 1;
+    const value = h.quantity * h.currentPrice * rate / unitDivisor;
+    const cost = h.quantity * h.avgCost * rate / unitDivisor;
     return {
       ...h,
       value,
@@ -3131,7 +3139,27 @@ function Portfolio({
     })),
     className: "px-2 py-1.5 rounded-2xl text-sm w-24",
     style: inputStyle
-  }))), isCash && /*#__PURE__*/React.createElement(Field, {
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "単価の基準"
+  }, /*#__PURE__*/React.createElement("select", {
+    value: hForm.priceUnit,
+    onChange: e => setHForm(f => ({
+      ...f,
+      priceUnit: e.target.value
+    })),
+    className: "px-2 py-1.5 rounded-2xl text-sm",
+    style: inputStyle
+  }, /*#__PURE__*/React.createElement("option", {
+    value: "10000"
+  }, "1万口あたり（投資信託）"), /*#__PURE__*/React.createElement("option", {
+    value: "1"
+  }, "1口・1株あたり（個別株・ETF）")))), isUnitBased && hForm.quantity && hForm.currentPrice && /*#__PURE__*/React.createElement("div", {
+    className: "mt-2",
+    style: {
+      fontSize: 10,
+      color: T.inkSoft
+    }
+  }, "評価額プレビュー：", yen(Number(hForm.quantity) * Number(hForm.currentPrice) / (hForm.priceUnit === "10000" ? 10000 : 1)), hForm.priceUnit === "10000" && "（eMAXIS Slimなど投資信託の基準価額は通常、1万口あたりの価格です）"), isCash && /*#__PURE__*/React.createElement(Field, {
     label: "残高（円）"
   }, /*#__PURE__*/React.createElement("input", {
     type: "number",
@@ -3321,7 +3349,7 @@ function Portfolio({
     style: {
       color: T.inkSoft
     }
-  }, h.accountType === "現金" || h.accountType === "不動産" ? `${h.accountType} ・ ${h.currency}` : `${h.accountType} ・ ${h.quantity.toFixed(2)}口 ・ ${h.currency}`), (h.accountType === "NISA" || h.accountType === "iDeCo") && Number(h.allocationPercent) > 0 && /*#__PURE__*/React.createElement("div", {
+  }, h.accountType === "現金" || h.accountType === "不動産" ? `${h.accountType} ・ ${h.currency}` : `${h.accountType} ・ ${h.quantity.toFixed(2)}口 ・ ${h.currency} ・ ${h.priceUnit === "10000" ? "単価は1万口あたり" : "単価は1口あたり"}`), (h.accountType === "NISA" || h.accountType === "iDeCo") && Number(h.allocationPercent) > 0 && /*#__PURE__*/React.createElement("div", {
     className: "text-xs mb-1",
     style: {
       color: T.brass
