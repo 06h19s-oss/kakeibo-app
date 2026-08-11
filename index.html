@@ -431,7 +431,9 @@ function computeNetWorth(transactions, holdings, fx) {
   const cashBalance = transactions.reduce((s, t) => s + (t.type === "income" ? t.amount : -t.amount), 0);
   const portfolioValue = holdings.reduce((s, h) => {
     const rate = h.currency === "USD" ? fx : 1;
-    return s + h.quantity * h.currentPrice * rate;
+    const isUnitBased = h.accountType !== "現金" && h.accountType !== "不動産";
+    const unitDivisor = isUnitBased && h.priceUnit === "10000" ? 10000 : 1;
+    return s + h.quantity * h.currentPrice * rate / unitDivisor;
   }, 0);
   return cashBalance + portfolioValue;
 }
@@ -1026,6 +1028,7 @@ function App() {
       quantity: isUnit ? Number(hForm.quantity) : 1,
       avgCost,
       currentPrice,
+      priceUnit: isUnit ? hForm.priceUnit : "1",
       allocationPercent: Number(hForm.allocationPercent || 0),
       annualRent: Number(hForm.annualRent || 0),
       operatingExpenses: Number(hForm.operatingExpenses || 0),
@@ -1133,7 +1136,10 @@ function App() {
     // Japanese mutual funds (投資信託) quote 基準価額/取得単価 per 10,000
     // units by convention — treating it as a per-1-unit price inflates
     // the value 10,000x. Individual stocks/ETFs are priced per 1 unit.
-    const unitDivisor = h.priceUnit === "10000" ? 10000 : 1;
+    // Cash and real estate never use this convention (their quantity is
+    // always fixed at 1) regardless of what priceUnit happens to be set to.
+    const isUnitBased = h.accountType !== "現金" && h.accountType !== "不動産";
+    const unitDivisor = isUnitBased && h.priceUnit === "10000" ? 10000 : 1;
     const value = h.quantity * h.currentPrice * rate / unitDivisor;
     const cost = h.quantity * h.avgCost * rate / unitDivisor;
     return {
@@ -2999,6 +3005,7 @@ function Portfolio({
 }) {
   const [fxManual, setFxManual] = useState(false);
   const [showAllocationChart, setShowAllocationChart] = useState(false);
+  const [showHoldingsList, setShowHoldingsList] = useState(true);
   const [showContribSettings, setShowContribSettings] = useState(() => contribSettings.NISA.enabled || contribSettings.iDeCo.enabled);
   const timeStr = d => d ? d.toLocaleTimeString("ja-JP", {
     hour: "2-digit",
@@ -3176,7 +3183,8 @@ function Portfolio({
     value: hForm.currency,
     onChange: e => setHForm(f => ({
       ...f,
-      currency: e.target.value
+      currency: e.target.value,
+      priceUnit: e.target.value === "USD" ? "1" : f.priceUnit
     })),
     className: "px-2 py-1.5 rounded-2xl text-sm",
     style: inputStyle
@@ -3209,7 +3217,7 @@ function Portfolio({
     className: "px-2 py-1.5 rounded-2xl text-sm w-20",
     style: inputStyle
   })), hForm.costInputMode === "total" ? /*#__PURE__*/React.createElement(Field, {
-    label: "取得金額（合計・円）"
+    label: `取得金額（合計・${hForm.currency}）`
   }, /*#__PURE__*/React.createElement("input", {
     type: "number",
     placeholder: "例）139961",
@@ -3272,13 +3280,13 @@ function Portfolio({
       fontSize: 10,
       color: T.inkSoft
     }
-  }, "平均取得単価に換算：", (Number(hForm.totalCost) / Number(hForm.quantity) * (hForm.priceUnit === "10000" ? 10000 : 1)).toFixed(2), "円"), hForm.quantity && hForm.currentPrice && /*#__PURE__*/React.createElement("div", {
+  }, "平均取得単価に換算：", (Number(hForm.totalCost) / Number(hForm.quantity) * (hForm.priceUnit === "10000" ? 10000 : 1)).toFixed(2), " ", hForm.currency), hForm.quantity && hForm.currentPrice && /*#__PURE__*/React.createElement("div", {
     className: "mt-2",
     style: {
       fontSize: 10,
       color: T.inkSoft
     }
-  }, "評価額プレビュー：", yen(Number(hForm.quantity) * Number(hForm.currentPrice) / (hForm.priceUnit === "10000" ? 10000 : 1)), hForm.priceUnit === "10000" && "（eMAXIS Slimなど投資信託の基準価額は通常、1万口あたりの価格です）")), isCash && /*#__PURE__*/React.createElement(Field, {
+  }, "評価額プレビュー：", yen(Number(hForm.quantity) * Number(hForm.currentPrice) * (hForm.currency === "USD" ? fx : 1) / (hForm.priceUnit === "10000" ? 10000 : 1)), hForm.currency === "USD" && ` （為替レート ${fx} で換算）`, hForm.priceUnit === "10000" && "（eMAXIS Slimなど投資信託の基準価額は通常、1万口あたりの価格です）")), isCash && /*#__PURE__*/React.createElement(Field, {
     label: "残高（円）"
   }, /*#__PURE__*/React.createElement("input", {
     type: "number",
@@ -3433,13 +3441,27 @@ function Portfolio({
     }
   }, hForm.accountType, "全体の積立設定（総額・頻度・次回日）は上部の「", hForm.accountType === "NISA" ? "NISA積立設定" : "iDeCo拠出設定", "」で行います。ここでは総額のうち何%をこの銘柄に振り分けるかだけを指定してください。"))), /*#__PURE__*/React.createElement("div", {
     className: "grid md:grid-cols-2 gap-6"
-  }, /*#__PURE__*/React.createElement("div", null, holdingsWithValue.length > 0 && /*#__PURE__*/React.createElement("div", {
-    className: "mb-2",
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowHoldingsList(v => !v),
+    className: "w-full flex items-center justify-between mb-2"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "text-sm font-bold",
+    style: {
+      color: T.inkSoft
+    }
+  }, "保有資産一覧（", holdingsWithValue.length, "件）"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: T.inkSoft,
+      fontSize: 12
+    }
+  }, showHoldingsList ? "▲ 閉じる" : "▼ 開く")), showHoldingsList && /*#__PURE__*/React.createElement(React.Fragment, null, holdingsWithValue.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center justify-between mb-2"
+  }, /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 10,
       color: T.inkSoft
     }
-  }, "価格は無料の検索リンク（各行の🔍）で確認し、手動で更新してください。"), priceError && /*#__PURE__*/React.createElement("div", {
+  }, "価格は無料の検索リンク（各行の🔍）で確認し、手動で更新してください。")), priceError && /*#__PURE__*/React.createElement("div", {
     className: "mb-2",
     style: {
       fontSize: 11,
@@ -3528,7 +3550,7 @@ function Portfolio({
   })), /*#__PURE__*/React.createElement(ConfirmDeleteButton, {
     onConfirm: () => deleteHolding(h.id),
     size: 16
-  }))))))), /*#__PURE__*/React.createElement("div", {
+  })))))))), /*#__PURE__*/React.createElement("div", {
     className: "p-4 rounded-2xl",
     style: {
       background: T.glass,
